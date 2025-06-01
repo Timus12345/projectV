@@ -4,6 +4,7 @@ import 'package:wifi_iot/wifi_iot.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:app_settings/app_settings.dart';
 import 'dart:async';
 
 // Переименовываем класс, чтобы избежать конфликта с wifi_iot
@@ -28,6 +29,17 @@ class WifiService {
   WifiService._internal();
 
   final NetworkInfo _networkInfo = NetworkInfo();
+
+  // Открытие системного окна настроек Wi-Fi
+  Future<void> openSystemWifiSettings() async {
+    try {
+      await AppSettings.openAppSettings(type: AppSettingsType.wifi);
+
+    } catch (e) {
+      debugPrint('Ошибка при открытии системных настроек Wi-Fi: $e');
+      throw Exception('Не удалось открыть системные настройки Wi-Fi: $e');
+    }
+  }
 
   // Получение текущей подключенной сети
   Future<String?> getCurrentWifiName() async {

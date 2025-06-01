@@ -31,11 +31,16 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
   StreamSubscription? _connectivitySubscription;
   String? _connectedWifi;
   Timer? _refreshTimer;
+  bool _returnedFromSystemSettings = false;
 
   @override
   void initState() {
     super.initState();
-    _checkPermissionsAndScanWifi();
+    // Открываем системные настройки WiFi при первом запуске экрана
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _openSystemWifiSettings();
+    });
+    
     _initConnectivityListener();
     
     // Настраиваем автоматическое обновление списка сетей каждые 10 секунд
@@ -56,11 +61,40 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     super.dispose();
   }
 
+  // Открытие системных настроек WiFi
+  Future<void> _openSystemWifiSettings() async {
+    try {
+      await _wifiService.openSystemWifiSettings();
+      setState(() {
+        _returnedFromSystemSettings = false;
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ошибка при открытии настроек Wi-Fi: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   // Инициализация слушателя подключения
   void _initConnectivityListener() {
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
       if (result == ConnectivityResult.wifi) {
         _updateConnectedWifi();
+        
+        // Если вернулись из системных настроек и подключились к WiFi
+        if (!_returnedFromSystemSettings) {
+          setState(() {
+            _returnedFromSystemSettings = true;
+          });
+          
+          // Проверяем и сканируем сети после возврата из системных настроек
+          _checkPermissionsAndScanWifi(showLoading: true);
+        }
       } else {
         setState(() {
           _connectedWifi = null;
@@ -76,13 +110,34 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
   Future<void> _updateConnectedWifi() async {
     try {
       final ssid = await _wifiService.getCurrentWifiName();
-      setState(() {
-        _connectedWifi = ssid;
-      });
+      
+      if (mounted) {
+        setState(() {
+          _connectedWifi = ssid;
+          
+          // Если вернулись из системных настроек и есть подключение к WiFi,
+          // автоматически выбираем эту сеть
+          if (_returnedFromSystemSettings && ssid != null && _currentStep == 0) {
+            // Ищем сеть в списке или создаем новую
+            SmartHomeWifiNetwork? network = _wifiNetworks.firstWhere(
+              (net) => net.ssid == ssid,
+              orElse: () => SmartHomeWifiNetwork(
+                ssid: ssid,
+                signalStrength: 100,
+                isCurrentNetwork: true,
+              ),
+            );
+            
+            _selectWifiNetwork(network);
+          }
+        });
+      }
     } catch (e) {
-      setState(() {
-        _connectedWifi = null;
-      });
+      if (mounted) {
+        setState(() {
+          _connectedWifi = null;
+        });
+      }
     }
   }
 
@@ -114,6 +169,16 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
           _wifiNetworks = networks;
           _isScanning = false;
         });
+        
+        // Если вернулись из системных настроек и есть подключение к WiFi,
+        // автоматически выбираем эту сеть
+        if (_returnedFromSystemSettings && _connectedWifi != null && _currentStep == 0) {
+          // Ищем сеть в списке
+          final networkIndex = networks.indexWhere((net) => net.ssid == _connectedWifi);
+          if (networkIndex != -1) {
+            _selectWifiNetwork(networks[networkIndex]);
+          }
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -248,6 +313,12 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
       appBar: AppBar(
         title: const Text('Добавление устройства'),
         actions: [
+          // Кнопка для вызова системных настроек WiFi
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: _openSystemWifiSettings,
+            tooltip: 'Системные настройки Wi-Fi',
+          ),
           // Кнопка для включения/выключения автообновления
           if (_currentStep == 0)
             IconButton(
@@ -451,18 +522,39 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
             ),
           ),
         
-        Center(
-          child: ElevatedButton.icon(
-            onPressed: _isScanning ? null : () => _checkPermissionsAndScanWifi(),
-            icon: const Icon(Icons.refresh),
-            label: const Text('Обновить список'),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+        // Кнопки действий
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _isScanning ? null : () => _checkPermissionsAndScanWifi(),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Обновить список'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
               ),
             ),
-          ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _openSystemWifiSettings,
+                icon: const Icon(Icons.settings),
+                label: const Text('Системные настройки'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  backgroundColor: theme.colorScheme.secondary,
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -700,27 +792,62 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
             ),
           ),
         const SizedBox(height: 24),
-        Center(
-          child: ElevatedButton(
-            onPressed: _isConnecting ? null : _connectToWifi,
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+        
+        // Кнопки действий
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _isConnecting ? null : () {
+                  setState(() {
+                    _currentStep = 0;
+                  });
+                },
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('Назад'),
               ),
             ),
-            child: _isConnecting
-                ? const SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    ),
-                  )
-                : const Text('Подключиться'),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _isConnecting ? null : _connectToWifi,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: _isConnecting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : const Text('Подключиться'),
+              ),
+            ),
+          ],
+        ),
+        
+        const SizedBox(height: 16),
+        
+        // Кнопка для открытия системных настроек
+        Center(
+          child: TextButton.icon(
+            onPressed: _openSystemWifiSettings,
+            icon: const Icon(Icons.settings),
+            label: const Text('Открыть системные настройки Wi-Fi'),
           ),
         ),
+        
         if (_isConnected) ...[
           const SizedBox(height: 16),
           Center(
@@ -774,70 +901,164 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
             ),
           ),
         
-        DropdownButtonFormField<SmartHomeWifiNetwork>(
-          decoration: InputDecoration(
-            labelText: 'WiFi сеть',
-            prefixIcon: const Icon(Icons.wifi),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
+        // Информация о выбранной сети
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primary.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
           ),
-          value: _selectedNetwork,
-          items: _wifiNetworks.map((network) {
-            return DropdownMenuItem<SmartHomeWifiNetwork>(
-              value: network,
-              child: Text(network.ssid),
-            );
-          }).toList(),
-          onChanged: (value) {
-            setState(() {
-              _selectedNetwork = value;
-            });
-          },
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.wifi,
+                    color: theme.colorScheme.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Сеть: ${_selectedNetwork?.ssid ?? ""}',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(
+                    _selectedNetwork?.isSecure ?? true ? Icons.lock_outline : Icons.lock_open,
+                    color: theme.colorScheme.primary,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _selectedNetwork?.isSecure ?? true ? 'Защищенная сеть' : 'Открытая сеть',
+                    style: TextStyle(
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 24),
+        
+        const Text(
+          'Устройство будет подключено к выбранной сети:',
+          style: TextStyle(fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 16),
-        TextField(
-          controller: _passwordController,
-          decoration: InputDecoration(
-            labelText: 'Пароль',
-            prefixIcon: const Icon(Icons.lock_outline),
-            suffixIcon: IconButton(
-              icon: Icon(
-                _showPassword ? Icons.visibility_off : Icons.visibility,
-              ),
-              onPressed: () {
-                setState(() {
-                  _showPassword = !_showPassword;
-                });
-              },
-            ),
-            border: OutlineInputBorder(
+        
+        // Информация о пароле
+        if (_selectedNetwork?.isSecure ?? true)
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey.shade300),
               borderRadius: BorderRadius.circular(8),
             ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Пароль:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(Icons.lock_outline, size: 16),
+                    const SizedBox(width: 8),
+                    Text(
+                      _showPassword ? _passwordController.text : '•' * _passwordController.text.length,
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: Icon(
+                        _showPassword ? Icons.visibility_off : Icons.visibility,
+                        size: 16,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _showPassword = !_showPassword;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          )
+        else
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.green.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.lock_open, color: Colors.green),
+                SizedBox(width: 8),
+                Text(
+                  'Открытая сеть, пароль не требуется',
+                  style: TextStyle(color: Colors.green),
+                ),
+              ],
+            ),
           ),
-          obscureText: !_showPassword,
-        ),
+        
         const SizedBox(height: 24),
-        Center(
-          child: ElevatedButton(
-            onPressed: _isConnecting ? null : _connectDeviceToWifi,
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+        
+        // Кнопки действий
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _isConnecting ? null : () {
+                  setState(() {
+                    _currentStep = 1;
+                  });
+                },
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('Назад'),
               ),
             ),
-            child: _isConnecting
-                ? const SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    ),
-                  )
-                : const Text('Подключить устройство'),
-          ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _isConnecting ? null : _connectDeviceToWifi,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: _isConnecting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : const Text('Подключить устройство'),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -849,82 +1070,109 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Настройка устройства:',
+          'Устройство успешно подключено к сети',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 16),
+        
+        // Информация о подключении
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.green.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.check_circle, color: Colors.green),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Устройство подключено к сети ${_selectedNetwork?.ssid ?? ""}',
+                  style: const TextStyle(color: Colors.green),
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 24),
+        
+        const Text(
+          'Завершите настройку устройства:',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 16),
+        
+        // Поле для имени устройства
         TextField(
           controller: _deviceNameController,
           decoration: InputDecoration(
             labelText: 'Название устройства',
-            prefixIcon: const Icon(Icons.device_hub),
+            prefixIcon: const Icon(Icons.devices),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
             ),
           ),
         ),
         const SizedBox(height: 16),
+        
+        // Поле для местоположения
         TextField(
           controller: _locationController,
           decoration: InputDecoration(
             labelText: 'Местоположение',
-            prefixIcon: const Icon(Icons.location_on_outlined),
+            prefixIcon: const Icon(Icons.location_on),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
             ),
           ),
         ),
-        const SizedBox(height: 16),
-        DropdownButtonFormField<String>(
-          decoration: InputDecoration(
-            labelText: 'Тип устройства',
-            prefixIcon: const Icon(Icons.category),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
-          ),
-          value: 'camera',
-          items: const [
-            DropdownMenuItem(
-              value: 'camera',
-              child: Text('Камера'),
-            ),
-            DropdownMenuItem(
-              value: 'thermostat',
-              child: Text('Термостат'),
-            ),
-            DropdownMenuItem(
-              value: 'temperatureSensor',
-              child: Text('Датчик температуры'),
-            ),
-            DropdownMenuItem(
-              value: 'switch',
-              child: Text('Переключатель'),
-            ),
-          ],
-          onChanged: (value) {},
-        ),
+        
         const SizedBox(height: 24),
-        Center(
-          child: ElevatedButton(
-            onPressed: _isConnecting ? null : _finishSetup,
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+        
+        // Кнопки действий
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _isConnecting ? null : () {
+                  setState(() {
+                    _currentStep = 2;
+                  });
+                },
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('Назад'),
               ),
             ),
-            child: _isConnecting
-                ? const SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    ),
-                  )
-                : const Text('Завершить настройку'),
-          ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _isConnecting ? null : _finishSetup,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: _isConnecting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : const Text('Завершить настройку'),
+              ),
+            ),
+          ],
         ),
       ],
     );
